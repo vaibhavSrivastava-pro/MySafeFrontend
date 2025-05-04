@@ -96,7 +96,7 @@ const Connect: React.FC = () => {
 
     try {
       console.log('Form data:', process.env);
-      const response = await fetch(`http://192.168.217.186:3000/connect`, {
+      const response = await fetch(`http://192.168.217.124:3000/connect`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

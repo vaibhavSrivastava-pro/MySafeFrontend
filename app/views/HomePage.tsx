@@ -3,7 +3,7 @@ import { useNavigation } from '@react-navigation/native';
 import axios from 'axios';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system';
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -31,7 +31,8 @@ const HomePage: React.FC = () => {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [encryptionKey, setEncryptionKey] = useState<string>('');
-  const [selectedFileName, setSelectedFileName] = useState<string>('data.txt');
+  const [selectedFileName, setSelectedFileName] = useState<string>('');
+  const [currentFileUri, setCurrentFileUri] = useState<string | null>(null);
   
   // State for modal control
   const [passwordModalVisible, setPasswordModalVisible] = useState<boolean>(false);
@@ -41,16 +42,12 @@ const HomePage: React.FC = () => {
 
   const navigation = useNavigation<any>();
 
-  useEffect(() => {
-    getEncryptedTestValue();
-    loadDefaultFile();
-  }, []);
-
   // API-based encryption function
-  const encryptContent = async (content: string, password: string): Promise<string> => {
+  const encryptContent = async (data: {content: string, metadata: string}, password: string): Promise<string> => {
     try {
-      const response = await axios.post('http://192.168.217.186:3000/encrypt', {
-        data: content,
+      const response = await axios.post('http://192.168.217.124:3000/encrypt', {
+        data: data.content,
+        metadata: data.metadata,
         password: password
       });
       
@@ -68,7 +65,7 @@ const HomePage: React.FC = () => {
   // API-based decryption function
   const decryptContent = async (encryptedData: string, password: string): Promise<string> => {
     try {
-      const response = await axios.post('http://192.168.217.186:3000/decrypt', {
+      const response = await axios.post('http://192.168.217.124:3000/decrypt', {
         encryptedData: encryptedData,
         password: password
       });
@@ -84,26 +81,6 @@ const HomePage: React.FC = () => {
     }
   };
 
-  // Function to test encryption/decryption
-  const getEncryptedTestValue = async () => {
-    try {
-      const testMessage = 'Hi';
-      const testPassword = 'aaaaaa';
-      
-      const encryptedValue = await encryptContent(testMessage, testPassword);
-      console.log('Encrypted value of "Hi" with password "aaaaaa":', encryptedValue);
-      
-      // Verify it works by decrypting
-      const decrypted = await decryptContent(encryptedValue, testPassword);
-      console.log('Decrypted back:', decrypted);
-      
-      return encryptedValue;
-    } catch (error) {
-      console.error('Encryption test failed:', error);
-      return null;
-    }
-  };
-
   // File loading and handling functions
   const loadFile = async () => {
     try {
@@ -113,8 +90,42 @@ const HomePage: React.FC = () => {
       });
 
       if (result.assets && result.assets.length > 0) {
-        setSelectedFileName(result.assets[0].name);
-        promptForKeyAndDecrypt(result.assets[0].uri);
+        const fileUri = result.assets[0].uri;
+        const fileName = result.assets[0].name;
+        
+        setSelectedFileName(fileName);
+        setCurrentFileUri(fileUri);
+        
+        try {
+          // Check if file is encrypted by trying to read it as plain text first
+          let fileContent;
+          if (Platform.OS === 'web') {
+            const response = await fetch(fileUri);
+            fileContent = await response.text();
+          } else {
+            fileContent = await FileSystem.readAsStringAsync(fileUri);
+          }
+          
+          // Try to determine if it's an encrypted file
+          // (This is a simple heuristic - you might need a better way to detect encrypted content)
+          if (fileContent.startsWith('U2F') || fileContent.includes('==') || /^[A-Za-z0-9+/=]+$/.test(fileContent)) {
+            // Likely encrypted, prompt for decryption key
+            setPendingFileUri(fileUri);
+            setPasswordModalMode('decrypt');
+            setPasswordModalVisible(true);
+          } else {
+            // Treat as plain text
+            setFileContent(fileContent);
+            setIsEdited(false);
+            setIsSaved(true);
+            setEncryptionKey('');  // Reset encryption key since it's plain text
+            setError(null);
+          }
+        } catch (err) {
+          console.error('Error reading file:', err);
+          setError('Failed to read selected file');
+          setIsLoading(false);
+        }
       }
     } catch (err) {
       console.error('File selection error:', err);
@@ -122,115 +133,70 @@ const HomePage: React.FC = () => {
     }
   };
 
-  const loadDefaultFile = async () => {
-    try {
-      setIsLoading(true);
-
-      try {
-        const response = await axios.post(`http://192.168.217.186:3000/open`);
-        const encryptedContent = response.data.content;
-
-        promptUserForKeyAndDecrypt(encryptedContent);
-      } catch (err) {
-        console.error('Failed to load from API, falling back to file input');
-        setError('Could not load default file automatically. Please select it manually.');
-        setIsLoading(false);
-
-        // Show alert to ask user to select file manually
-        Alert.alert(
-          'Default File Not Available',
-          'Could not load default file. Would you like to select a file?',
-          [
-            { text: 'Cancel', style: 'cancel' },
-            { text: 'Select File', onPress: loadFile },
-          ]
-        );
-      }
-    } catch (err) {
-      console.error('Failed to load default file:', err);
-      setError(`Failed to load default file: ${err instanceof Error ? err.message : 'Unknown error'}`);
-      setIsLoading(false);
-    }
-  };
-
   // Modal control functions
-  const promptUserForKeyAndDecrypt = (encryptedContent: string) => {
-    console.log('Encrypted content:', encryptedContent);
-    setPendingEncryptedContent(encryptedContent);
-    setPasswordModalMode('decrypt');
-    setPasswordModalVisible(true);
-  };
-
-  const handleDecryptionKeySubmit = async (key: string) => {
-    setPasswordModalVisible(false);
+// Modal control functions
+const handleDecryptionKeySubmit = async (key: string) => {
+  setPasswordModalVisible(false);
+  
+  if (!key || !pendingFileUri) {
+    setError('Decryption key is required');
+    setIsLoading(false);
+    return;
+  }
+  
+  setEncryptionKey(key);
+  setIsLoading(true);
+  
+  try {
+    // Read the encrypted content from the file
+    let encryptedContent;
     
-    if (!key || !pendingEncryptedContent) {
-      setError('Decryption key is required');
-      setIsLoading(false);
-      return;
+    if (Platform.OS === 'web') {
+      const response = await fetch(pendingFileUri);
+      encryptedContent = await response.text();
+    } else {
+      encryptedContent = await FileSystem.readAsStringAsync(pendingFileUri);
     }
     
-    setEncryptionKey(key);
+    const decryptedContent = await decryptContent(encryptedContent, key);
     
+    // Call the /open API with fileName and decryptedContent
     try {
-      const decryptedContent = await decryptContent(pendingEncryptedContent, key);
+      const openResponse = await axios.post('http://192.168.217.124:3000/open', {
+        fileName: selectedFileName,
+        decryptedContent: decryptedContent
+      });
+      
+      // Use the latest content returned from the API
+      if (openResponse.status === 200 && openResponse.data.latestContent) {
+        setFileContent(openResponse.data.latestContent);
+      } else {
+        // If API doesn't return latest content, use the decrypted content
+        setFileContent(decryptedContent);
+      }
+    } catch (openErr) {
+      console.error('Failed to fetch latest content:', openErr);
+      // If the API call fails, still show the decrypted content
       setFileContent(decryptedContent);
-      setIsLoading(false);
-      setIsEdited(false);
-      setIsSaved(false);
-      setError(null);
-    } catch (err) {
-      console.error('Decryption failed:', err);
-      setError('Failed to decrypt file. Invalid key or corrupted file.');
-      setIsLoading(false);
+      // Optionally show a non-blocking warning
+      Alert.alert('Warning', 'Loaded local file content. Failed to fetch latest version.');
     }
-  };
+    
+    setIsLoading(false);
+    setIsEdited(false);
+    setIsSaved(true);
+    setError(null);
+  } catch (err) {
+    console.error('Decryption failed:', err);
+    setError('Failed to decrypt file. Invalid key or corrupted file.');
+    setIsLoading(false);
+  }
+};
 
   const handleDecryptionCancel = () => {
     setPasswordModalVisible(false);
     setError('Decryption key is required');
     setIsLoading(false);
-  };
-
-  const promptForKeyAndDecrypt = async (fileUri: string) => {
-    setPendingFileUri(fileUri);
-    setPasswordModalMode('decrypt');
-    setPasswordModalVisible(true);
-  };
-  
-  const handleFileDecryptionSubmit = async (key: string) => {
-    setPasswordModalVisible(false);
-    
-    if (!key || !pendingFileUri) {
-      setError('Decryption key is required');
-      return;
-    }
-    
-    setEncryptionKey(key);
-    setIsLoading(true);
-    
-    try {
-      let encryptedContent;
-      
-      if (Platform.OS === 'web') {
-        // For web, use fetch API to read file content
-        const response = await fetch(pendingFileUri);
-        encryptedContent = await response.text();
-      } else {
-        // For native platforms, use FileSystem
-        encryptedContent = await FileSystem.readAsStringAsync(pendingFileUri);
-      }
-      const decryptedContent = await decryptContent(encryptedContent, key);
-      setFileContent(decryptedContent);
-      setIsLoading(false);
-      setIsEdited(false);
-      setIsSaved(false);
-      setError(null);
-    } catch (err) {
-      console.error('Decryption failed:', err);
-      setError('Failed to decrypt file. Invalid key or corrupted file.');
-      setIsLoading(false);
-    }
   };
 
   // Content handling functions
@@ -241,11 +207,22 @@ const HomePage: React.FC = () => {
   };
 
   const saveFile = async () => {
-    if (!encryptionKey) {
-      setPasswordModalMode('encrypt');
-      setPasswordModalVisible(true);
+    if (!currentFileUri) {
+      setError('No file is currently open');
+      return;
+    }
+
+    // If we need to encrypt the content before saving
+    if (encryptionKey || passwordModalMode === 'encrypt') {
+      if (!encryptionKey) {
+        setPasswordModalMode('encrypt');
+        setPasswordModalVisible(true);
+      } else {
+        performSave(encryptionKey);
+      }
     } else {
-      performSave(encryptionKey);
+      // Save as plain text if no encryption key is set
+      performSavePlainText();
     }
   };
   
@@ -262,26 +239,87 @@ const HomePage: React.FC = () => {
   };
 
   const performSave = async (key: string) => {
+    if (!currentFileUri) {
+      setError('No file is currently open');
+      return;
+    }
+
     try {
       setIsLoading(true);
       
+      // Create a data structure with content and metadata
+      const fileData = {
+        content: fileContent,
+        metadata: new Date().toISOString()
+      };
+      
+      // Convert to string for encryption
+      const jsonData = fileData;
+      
       // Encrypt the content before saving
-      const encryptedContent = await encryptContent(fileContent, key);
+      const encryptedContent = await encryptContent(jsonData, key);
       
-      // Send the encrypted content to API
-      const response = await axios.post(`http://192.168.217.186:3000/save`, {
-        content: encryptedContent,
-      });
-      
-      if (response.status === 200) {
-        setIsEdited(false);
-        setIsSaved(true);
-        setError(null);
-        Alert.alert('Success', 'File saved successfully');
+      // Save encrypted content back to the same file
+      if (Platform.OS === 'web') {
+        // For web, trigger a download of encrypted content
+        const blob = new Blob([encryptedContent], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = selectedFileName || 'encrypted-document.txt';
+        document.body.appendChild(a);
+        a.click();
+        URL.revokeObjectURL(url);
+        document.body.removeChild(a);
       } else {
-        throw new Error('Failed to save file');
+        await FileSystem.writeAsStringAsync(currentFileUri, encryptedContent);
       }
       
+      setIsEdited(false);
+      setIsSaved(true);
+      setError(null);
+      Alert.alert('Success', 'File saved successfully');
+      setIsLoading(false);
+    } catch (err) {
+      console.error('Failed to save file:', err);
+      setError(`Failed to save file: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      setIsLoading(false);
+    }
+  };
+
+  const performSavePlainText = async () => {
+    if (!currentFileUri) {
+      setError('No file is currently open');
+      return;
+    }
+
+    try {
+      setIsLoading(true);
+      
+      // Save content as plain text
+      if (Platform.OS === 'web') {
+        // For web, we need to use a different approach
+        // This is a simplified version - in production you might need to use File API
+        const blob = new Blob([fileContent], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        
+        // Create a link and trigger download (this is a common web pattern)
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = selectedFileName || 'document.txt';
+        document.body.appendChild(a);
+        a.click();
+        URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+      } else {
+        await FileSystem.writeAsStringAsync(currentFileUri, fileContent);
+      }
+      
+      setIsEdited(false);
+      setIsSaved(true);
+      setError(null);
+      Alert.alert('Success', 'File saved successfully');
       setIsLoading(false);
     } catch (err) {
       console.error('Failed to save file:', err);
@@ -291,15 +329,58 @@ const HomePage: React.FC = () => {
   };
 
   const uploadFile = async () => {
-    if (!encryptionKey) {
-      setError('Encryption key is required');
+    if (!currentFileUri) {
+      setError('No file is currently open');
       return;
     }
 
+    if (!isSaved && isEdited) {
+      Alert.alert(
+        'Unsaved Changes',
+        'There are unsaved changes. Do you want to save before uploading?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { 
+            text: 'Upload Without Saving', 
+            onPress: () => performUpload() 
+          },
+          { 
+            text: 'Save and Upload', 
+            onPress: async () => {
+              if (encryptionKey) {
+                await performSave(encryptionKey);
+              } else {
+                await performSavePlainText();
+              }
+              performUpload();
+            }
+          },
+        ]
+      );
+    } else {
+      performUpload();
+    }
+  };
+
+  const performUpload = async () => {
     try {
       setIsLoading(true);
 
-      await axios.post(`http://192.168.217.186:3000/upload`);
+      // Read the file content (could be plain or encrypted)
+      let fileContent;
+      if (Platform.OS === 'web') {
+        const response = await fetch(currentFileUri!);
+        fileContent = await response.text();
+      } else {
+        fileContent = await FileSystem.readAsStringAsync(currentFileUri!);
+      }
+      
+      // Send the file to the upload API
+      await axios.post(`http://192.168.217.124:3000/upload`, {
+        fileName: selectedFileName,
+        content: fileContent,
+        isEncrypted: !!encryptionKey
+      });
 
       setError(null);
       setIsLoading(false);
@@ -313,7 +394,7 @@ const HomePage: React.FC = () => {
 
   const disconnect = async () => {
     try {
-      await axios.post(`http://192.168.217.186:3000/disconnect`);
+      await axios.post(`http://192.168.217.124:3000/disconnect`);
       navigation.navigate('Connect');
     }
     catch (err) {
@@ -348,7 +429,7 @@ const HomePage: React.FC = () => {
             value={fileContent}
             onChangeText={handleContentChange}
             editable={!isLoading}
-            placeholder="Open an encrypted file or create new content..."
+            placeholder="Open a file to edit its content..."
             multiline={true}
             numberOfLines={10}
           />
@@ -364,17 +445,17 @@ const HomePage: React.FC = () => {
           </TouchableOpacity>
 
           <TouchableOpacity
-            style={[styles.button, styles.saveButton]}
+            style={[styles.button, styles.saveButton, (!currentFileUri || (!fileContent && !isEdited)) ? styles.disabledButton : null]}
             onPress={saveFile}
-            disabled={isLoading || (!fileContent && !isEdited)}
+            disabled={isLoading || !currentFileUri || (!fileContent && !isEdited)}
           >
             <Text style={styles.buttonText}>Save File</Text>
           </TouchableOpacity>
 
           <TouchableOpacity
-            style={[styles.button, styles.uploadButton]}
+            style={[styles.button, styles.uploadButton, (!currentFileUri) ? styles.disabledButton : null]}
             onPress={uploadFile}
-            disabled={isLoading || !fileContent}
+            disabled={isLoading || !currentFileUri}
           >
             <Text style={styles.buttonText}>Upload</Text>
           </TouchableOpacity>
@@ -393,7 +474,7 @@ const HomePage: React.FC = () => {
         isVisible={passwordModalVisible}
         mode={passwordModalMode}
         onSubmit={passwordModalMode === 'decrypt' ? 
-          (pendingFileUri ? handleFileDecryptionSubmit : handleDecryptionKeySubmit) : 
+          handleDecryptionKeySubmit : 
           handleEncryptionKeySubmit}
         onCancel={handleDecryptionCancel}
       />
@@ -472,6 +553,9 @@ const styles = StyleSheet.create({
   },
   disconnectButton: {
     backgroundColor: '#F44336',
+  },
+  disabledButton: {
+    opacity: 0.5,
   },
   buttonText: {
     color: 'white',
