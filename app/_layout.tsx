@@ -1,12 +1,22 @@
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { useFonts } from 'expo-font';
-import { Stack } from 'expo-router';
-import { StatusBar } from 'expo-status-bar';
 import 'react-native-reanimated';
+import Connect from './views/Connect';
+import HomePage from './views/HomePage';
 
 import { useColorScheme } from '@/hooks/useColorScheme';
 
+type RootStackParamList = {
+  Connect: undefined;
+  Home: undefined;
+};
+
+const Stack = createNativeStackNavigator<RootStackParamList>();
+
+
 export default function RootLayout() {
+
   const colorScheme = useColorScheme();
   const [loaded] = useFonts({
     SpaceMono: require('../assets/fonts/SpaceMono-Regular.ttf'),
@@ -19,11 +29,15 @@ export default function RootLayout() {
 
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <Stack>
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen name="+not-found" />
-      </Stack>
-      <StatusBar style="auto" />
+      <Stack.Navigator
+        initialRouteName="Connect"
+        screenOptions={{
+          headerShown: false,
+        }}
+      >
+        <Stack.Screen name="Connect" component={Connect} />
+        <Stack.Screen name="Home" component={HomePage} />
+      </Stack.Navigator>
     </ThemeProvider>
   );
 }
